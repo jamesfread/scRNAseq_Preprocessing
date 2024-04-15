@@ -2,8 +2,8 @@
 title: "scRNA-Seq QC Tutorial"
 subtitle:  "James Read"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -36,53 +36,406 @@ Sample set-up, Removal of empty droplets, Filtering of genes, Quality Control of
 Load the packages need for this analysis
 ```{r, echo=TRUE, eval=FALSE, warning=FALSE, message=FALSE}
 library(SingleCellExperiment)
+library(DropletUtils)
+library(scater)
 library(Seurat)
-library(SeuratWrappers)
+library(Matrix)
+library(org.Mm.eg.db) # Mouse
+library(org.Hs.eg.db) # Human
 library(dplyr)
 library(scales)
 library(ggplot2)
 library(gridExtra)
+library(cowplot)
 library(glmGamPoi)
 library(harmony)
 library(tictoc)
+```
 
+```{r, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+library(SingleCellExperiment)
+library(DropletUtils)
+library(scater)
+library(Seurat)
+library(Matrix)
+library(org.Mm.eg.db) # Mouse
+library(org.Hs.eg.db) # Human
+library(dplyr)
+library(scales)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(glmGamPoi)
+library(harmony)
+library(tictoc)
+```
+# Set up
+
+```{r, echo = FALSE, eval=TRUE}
+In.dir = "C:/Users/jread/Desktop/Work/Git/scRNAseq_Preprocessing/Data"
+Out.dir = "C:/Users/jread/Desktop/Work/Git/scRNAseq_Preprocessing/Output"
+```
+
+```{r, echo=TRUE, eval=FALSE}
+In.dir = "Path/To/scRNAseq_Preprocessing/Data"
+Out.dir = "Path/To/scRNAseq_Preprocessing/Output"
 ```
 
 
-# Set up
-
-In.dir = "C:/Users/skipp/Desktop/Work/UofA/Virus_scRNAseq/Raw_data"
-Out.dir = "C:/Users/skipp/Desktop/Work/UofA/Virus_scRNAseq/QC"
-
 # Choose sample
-samp = "Sample_1"
+```{r}
+samp = "Donor2"
+```
 
-
-# set directory path
-setwd(paste(In.dir, samp, sep = "/"))
 # Import files
-data.matrix <- readMM("matrix.mtx.gz")
-Barcodes <- read.table("barcodes.tsv.gz")
-Genes <- read.table("features.tsv.gz")
+
+Barcodes
+```{r}
+
+Barcodes <- read.table("https://raw.githubusercontent.com/jamesfread/scRNAseq_Preprocessing/main/Data/Donor2_5yr_Unstim_barcodes.tsv", sep = "\t")
+dim(Barcodes)
+head(Barcodes)
+```
+
+Features
+```{r}
+Genes = read.table("https://raw.githubusercontent.com/jamesfread/scRNAseq_Preprocessing/main/Data/Donor2_5yr_Unstim_features.tsv", sep = "\t")
+dim(Genes)
+head(Genes)
+```
+
+```{r, warning=FALSE, message=FALSE}
+setwd(In.dir)
+data.matrix <- readMM(paste0(samp, "_5yr_Unstim_matrix.mtx"))
+dim(data.matrix)
+```
+Annotate count matrix
+```{r}
 rownames(data.matrix) = Genes$V1; colnames(data.matrix) = Barcodes$V1
 
+```
 
-data.matrix[1:5, 1:5]
-head(Genes)
-head(Barcodes)
+## Create output directory
 
-# Set output directory
-
+```{r, warning=FALSE, message=FALSE}
 setwd(Out.dir)
-# Create folder
 dir.create(samp)
+```
+
+
+# Remove 'empty' droplets
+
+```{r}
+bcrank = barcodeRanks(data.matrix)
+# create index of unique data points for plotting (so not plotting hundreds of points on to of each other.)
+uniq = !duplicated(bcrank$rank)
+```
+
+Plot the curve. Use 'uniq' index to avoid duplicate data points.
+```{r, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
 setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("1)_", samp, "_Knee_plot.png"), units="in", width=5, height=5, res=600)
+plot(bcrank$rank[uniq], bcrank$total[uniq], main = samp, log="xy", xlab="Rank",
+     ylab="Total UMI count", cex.lab=1.2, cex = 0.7, pch = 19,
+     col = alpha("grey20", 0.5))
+abline(h=metadata(bcrank)$inflection, col="darkgreen", lty=2)
+abline(h=metadata(bcrank)$knee, col="dodgerblue", lty=2)
+legend("bottomleft", legend = c("Knee", "inflection"),
+       col=c("dodgerblue", "darkgreen"), lty=2, cex=1.2)
+invisible(dev.off())
+```
+
+```{r, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE, fig.align='center'}
+plot(bcrank$rank[uniq], bcrank$total[uniq], main = samp, log="xy", xlab="Rank",
+     ylab="Total UMI count", cex.lab=1.2, cex = 0.7, pch = 19,
+     col = alpha("grey20", 0.5))
+abline(h=metadata(bcrank)$inflection, col="darkgreen", lty=2)
+abline(h=metadata(bcrank)$knee, col="dodgerblue", lty=2)
+legend("bottomleft", legend = c("Knee", "inflection"),
+       col=c("dodgerblue", "darkgreen"), lty=2, cex=1.2)
+
+```
+
+Run emptyDrops function
+```{r, warning=FALSE, message=FALSE}
+set.seed(42) # Set seed for reproducibility
+e.out <- emptyDrops(data.matrix, lower = metadata(bcrank)$inflection, niters = 10000)
+```
+
+Subset data.matrix to only those predicted to contain a cell (False Discovery Rate < 0.01)
+```{r, warning=FALSE, message=FALSE}
+data.matrix <- data.matrix[,which(e.out$FDR<=0.01)]
+# Number of cell captured
+ncol(data.matrix)
+```
+
+# Filter genes
+
+### Create SingleCellExperiment (SCE) object
+
+```{r, warning=FALSE, message=FALSE}
+sce <- SingleCellExperiment(assays = list(counts = as.matrix(data.matrix)))
+# Transfer barcode name and gene information into the object
+colData(sce)$Barcode <- colnames(data.matrix)
+rowData(sce)$EnsemblID <- rownames(data.matrix) # EnsemblID
+rowData(sce)$GeneID <- Genes$V2 # gene name
+```
+
+Make sure row names are unique
+```{r}
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$EnsemblID, rowData(sce)$GeneID)
+
+dim(sce)
+```
+
+create index of genes with at least one count
+```{r, warning=FALSE, message=FALSE}
+keep <- rowSums(counts(sce)>0)>0
+# subset data set
+sce <- sce[keep,]
+# number of genes remaining
+nrow(sce)
+```
+
+Filter genes to those expressed in at least 1% of cells.
+```{r, warning=FALSE, message=FALSE}
+## 1% of cells
+ncol(sce)*0.01
+# create gene index
+keep_feature <- nexprs(sce, byrow = TRUE) >= ncol(sce)*0.01
+# subset data set
+sce <- sce[keep_feature,]
+# number of genes remaining
+nrow(sce)
+```
+
+# Quality control of cells
+
+### Check chromosome information
+
+```{r, warning=FALSE, message=FALSE}
+map <- mapIds(org.Hs.eg.db, keys = as.character(rowData(sce)$EnsemblID),
+              column = "CHR", keytype = "ENSEMBL")
+rowData(sce)$CHR <- map
+```
+
+Create table of chromosome frequencies
+```{r}
+p1 = data.frame(table(rowData(sce)$CHR))
+# Order the results
+p1 = p1[order(as.numeric(-p1$Freq)),]
+```
+
+Plot by chromosome
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("2)_", samp, "_chromosome_bp.png"), units="in", width=12, height=5, res=600)
+barplot(p1$Freq, main = paste(samp,"\nFeatures per chromosome"), xlab = "Chromosome",
+        cex.main = 1.5, col = alpha("cyan", 0.2), border = "cyan3", lwd = 3,
+        names.arg = p1$Var1)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, echo=TRUE, eval=TRUE, fig.align='center', fig.width=12, fig.height=5}
+barplot(p1$Freq, main = paste(samp,"\nFeatures per chromosome"), xlab = "Chromosome",
+        cex.main = 1.5, col = alpha("cyan", 0.2), border = "cyan3", lwd = 3,
+        names.arg = p1$Var1)
+```
+
+Summary of chromosomes
+```{r}
+summary(map=="MT")
+```
+Organise and add mitochondrial (and ribosomal) gene info into the data set with the addPerCellQCMetrics function.
+```{r, warning=FALSE, message=FALSE}
+mt_genes <- grep("^MT-", rownames(sce), ignore.case = TRUE, value = TRUE)
+rb_genes <- grep("^RPS|^RPL", rownames(sce), ignore.case = TRUE, value = TRUE)
+controls <- list(Mito = mt_genes, Ribo = rb_genes)
+qc <- addPerCellQC(sce, subsets=controls, rownames(sce))
+```
+
+Plot histogram of the number of (unique) genes per cell
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("3a)_", samp, "_genes_hist.png"), units="in", width=7.5, height=5, res=300)
+hist(log(qc$detected, 10),
+     main = paste(samp, "- No. features (Log10)\n[Number of unique genes per cell]"),
+     xlab = "Log10 Unique Features", breaks = 50, col = "cyan", border = "grey")
+abline(v = c(log(250,10),log(500,10),log(1000,10),log(2000,10)), col = "black", lty = 2, lwd = 1.5)
+text(log(250,10),25, "250", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(500,10),50, "500", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(1000,10),75, "1000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(2000,10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.h = 5}
+hist(log(qc$detected, 10),
+     main = paste(samp, "- No. features (Log10)\n[Number of unique genes per cell]"),
+     xlab = "Log10 Unique Features", breaks = 50, col = "cyan", border = "grey")
+abline(v = c(log(250,10),log(500,10),log(1000,10),log(2000,10)), col = "black", lty = 2, lwd = 1.5)
+text(log(250,10),25, "250", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(500,10),50, "500", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(1000,10),75, "1000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(2000,10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+```
+
+Plot histogram of the number of transcripts per cell
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("3b)_", samp, "_transcripts_hist.png"), units="in", width=7.5, height=5, res=300)
+hist(log(qc$total, 10),
+     main = paste(samp, "- Library size (Log10)\n[Number of transcripts per cell]"),
+     xlab = "Log10 Total counts", breaks = 50, col = "cyan", border = "grey")
+abline(v = c(log(250,10),log(500,10),log(1000,10),log(2000,10)),
+       col = "black", lty = 2, lwd = 1.5)
+text(log(250,10),25, "250", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(500,10),50, "500", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(1000,10),75, "1000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(2000, 10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.h = 5}
+hist(log(qc$total, 10),
+     main = paste(samp, "- Library size (Log10)\n[Number of transcripts per cell]"),
+     xlab = "Log10 Total counts", breaks = 50, col = "cyan", border = "grey")
+abline(v = c(log(250,10),log(500,10),log(1000,10),log(2000,10)),
+       col = "black", lty = 2, lwd = 1.5)
+text(log(250,10),25, "250", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(500,10),50, "500", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(1000,10),75, "1000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+text(log(2000, 10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
+```
+
+### Exclude cell based on threshold
+
+```{r, warning=FALSE, message=FALSE}
+keep.n <- qc$detected > 200
+keep.total <- qc$total > 200
+table(keep.total); table(keep.n)
+# exclude cells
+qc.f <- qc[,keep.total & keep.n]
+dim(qc.f)
+```
+
+## Remove cell with high mitochondrial content
+
+Get mitochondrial content
+```{r}
+q.met = qc.f$subsets_Mito_percent
+```
+
+Plot 
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("4)_", samp, "_mito_thresh.png"), units="in", width=5, height=5, res=300)
+plot(log10(qc.f$total), q.met, xlab = "Log10(Total genes)",
+     ylab = "Mitochondrial genes (%)",
+     pch = 21, col = "black", bg = alpha("grey50", 0.5),
+     main = paste(samp, "\nMitochondrial content"), cex = 0.7)
+abline(h = median(q.met) + 3*mad(q.met), col = "dodgerblue", lty = 2, lwd=2)
+legend("right", legend = paste("Mitochondrial gene threshold = ",
+                               round(median(q.met) + 3*mad(q.met),2), "%", sep=""),
+       bty='n', text.col = "dodgerblue2", cex=0.7)
+polygon(x = c(-5, max(log10(qc.f$total))+5, max(log10(qc.f$total))+5, -5),
+        y=c(median(q.met) + 3*mad(q.met), median(q.met) + 3*mad(q.met), 100, 100),
+        col = alpha("grey", 0.5), density = 20,
+        border = alpha("grey", 0.6))
+in.out = table(q.met < (median(q.met) + 3*mad(q.met)))
+legend("topright", legend = paste("Excluded (n=", in.out[[1]], ")",sep=""),
+       bty='n', text.col = "grey30", cex=0.7, text.font=2)
+legend("bottomright", legend = paste("Retained (n=", in.out[[2]], ")",sep=""),
+       bty='n', text.col = "grey30", cex=0.7, text.font=2)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.h = 7.5}
+plot(log10(qc.f$total), q.met, xlab = "Log10(Total genes)",
+     ylab = "Mitochondrial genes (%)",
+     pch = 21, col = "black", bg = alpha("grey50", 0.5),
+     main = paste(samp, "\nMitochondrial content"), cex = 0.7)
+abline(h = median(q.met) + 3*mad(q.met), col = "dodgerblue", lty = 2, lwd=2)
+legend("right", legend = paste("Mitochondrial gene threshold = ",
+                               round(median(q.met) + 3*mad(q.met),2), "%", sep=""),
+       bty='n', text.col = "dodgerblue2", cex=0.7)
+polygon(x = c(-5, max(log10(qc.f$total))+5, max(log10(qc.f$total))+5, -5),
+        y=c(median(q.met) + 3*mad(q.met), median(q.met) + 3*mad(q.met), 100, 100),
+        col = alpha("grey", 0.5), density = 20,
+        border = alpha("grey", 0.6))
+in.out = table(q.met < (median(q.met) + 3*mad(q.met)))
+legend("topright", legend = paste("Excluded (n=", in.out[[1]], ")",sep=""),
+       bty='n', text.col = "grey30", cex=0.7, text.font=2)
+legend("bottomright", legend = paste("Retained (n=", in.out[[2]], ")",sep=""),
+       bty='n', text.col = "grey30", cex=0.7, text.font=2)
+```
+
+Remove the cells with high mitochondrial content
+```{r}
+sce1 = qc.f[, (q.met < (median(q.met) + 3*mad(q.met)))]
+```
 
 
+Plot histogram of genes after removing cells for mitochondrial content
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("5a)_", samp, "_genes_hist_after.png"), units="in", width=7.5, height=5, res=600)
+hist(log(sce1$detected, 10),
+     main="No. features (Log10)\n[Number of unique genes per cell]",
+     xlab = "Log10 Unique Features", breaks = 50, col = "cyan", border = "grey")
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.height=5}
+hist(log(sce1$detected, 10),
+     main="No. features (Log10)\n[Number of unique genes per cell]",
+     xlab = "Log10 Unique Features", breaks = 50, col = "cyan", border = "grey")
+```
 
 
+Plot histogram of transcripts after removing cells for mitochondrial content
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("5b)_", samp, "_transcripts_hist_after.png"), units="in", width=7.5, height=5, res=600)
+hist(log(sce1$total, 10),
+     main = "Library size (Log10)\n[Number of transcripts per cell]",
+     xlab = "Log10 Total counts", breaks = 50, col = "cyan", border = "grey")
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.height=5}
+hist(log(sce1$total, 10),
+     main = "Library size (Log10)\n[Number of transcripts per cell]",
+     xlab = "Log10 Total counts", breaks = 50, col = "cyan", border = "grey")
+```
 
 
+Plot filtered genes with mitochondrial and ribosomal content.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("6)_", samp, "_Filtered_genes_.png"), units="in", width=10, height=5, res=600)
+print(plot_grid(plotColData(qc, x = "detected", y="subsets_Mito_percent", colour_by="subsets_Ribo_percent") + 
+            scale_x_log10(limits = c(50,10000)) + ylim(0,70) +
+            stat_density2d(colour = "black", bins = 10),
+          plotColData(sce1, x = "detected", y="subsets_Mito_percent", colour_by="subsets_Ribo_percent") +
+            scale_x_log10(limits = c(50,10000)) + ylim(0,70) +
+            stat_density2d(colour = "black", bins = 10), ncol = 2))
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=15, fig.height=5}
+print(plot_grid(plotColData(qc, x = "detected", y="subsets_Mito_percent", colour_by="subsets_Ribo_percent") + 
+            scale_x_log10(limits = c(50,10000)) + ylim(0,70) +
+            stat_density2d(colour = "black", bins = 10),
+          plotColData(sce1, x = "detected", y="subsets_Mito_percent", colour_by="subsets_Ribo_percent") +
+            scale_x_log10(limits = c(50,10000)) + ylim(0,70) +
+            stat_density2d(colour = "black", bins = 10), ncol = 2))
+```
 
 
+# Basic Seurat processing
 
+
+HERE!!! from line 237
