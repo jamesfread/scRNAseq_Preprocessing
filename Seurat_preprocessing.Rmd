@@ -1,17 +1,82 @@
 ---
-title: "scRNASeq_preprocessing"
-output: html_document
+title: "scRNA-Seq QC Tutorial"
+subtitle:  "James Read"
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r echo=FALSE, include=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+```
+
+Single cell RNA-Seq quality control pipeline.
+
+This QC pipeline is tailored for output data formats from CellRanger (10X), which are generally includes a *barcodes.tsv* (cell identifiers), *featurestsv* (gene identifiers [gene names and Ensembl ID]), and *matrix.mtx* (raw counts data matrix). 
+
+Whilst the QC metrics in this pipeline are fairly standard, they can be customized to suit the project (for example, adjusting the gene filter and mitochondrial gene proportion thresholds), and the pipeline can be adjusted to suit output formats from other scRNA-Seq platforms.
+
+After the sample names, input directory, and output directories are given in the first step, the rest of the script can be run together. This pipeline can also be converted into a function and then run as a loop to apply the same QC parameters to all sample of an scRNA-Seq project (Although the QC plots and metric should be assessed to confirm the parameters are appropriate for each sample). 
+
+The outputs of this pipeline are the plots generated and a 'cleaned' version of the data saved as a Seurat object, ready for integration with other cleaned samples and downstream analysis.
+
+This example uses the raw counts from CellRanger (10X) of a sample from the CAS study scRNA-Seq experiemnt. The sample was generated from Cord Blood Mononuclear cells (CBMC) and it was an untreated control (not stimulated with a model antigen). It takes approximately 20 minutes to run.
+
+This pipeline contains the following sections:
+Sample set-up, Removal of empty droplets, Filtering of genes, Quality Control of cells, Basic Seurat pre-processing and data exploration, Cell cycle phase estimation, Doublet cell detection and removal, SingleR annotation, and key metrics and save sample.
+
+\newpage
+
+### Load packages
+
+Load the packages need for this analysis
+```{r, echo=TRUE, eval=FALSE, warning=FALSE, message=FALSE}
+library(SingleCellExperiment)
+library(Seurat)
+library(SeuratWrappers)
+library(dplyr)
+library(scales)
+library(ggplot2)
+library(gridExtra)
+library(glmGamPoi)
+library(harmony)
+library(tictoc)
+
+```
 
 
+# Set up
+
+In.dir = "C:/Users/skipp/Desktop/Work/UofA/Virus_scRNAseq/Raw_data"
+Out.dir = "C:/Users/skipp/Desktop/Work/UofA/Virus_scRNAseq/QC"
+
+# Choose sample
+samp = "Sample_1"
 
 
+# set directory path
+setwd(paste(In.dir, samp, sep = "/"))
+# Import files
+data.matrix <- readMM("matrix.mtx.gz")
+Barcodes <- read.table("barcodes.tsv.gz")
+Genes <- read.table("features.tsv.gz")
+rownames(data.matrix) = Genes$V1; colnames(data.matrix) = Barcodes$V1
 
+
+data.matrix[1:5, 1:5]
+head(Genes)
+head(Barcodes)
+
+# Set output directory
+
+setwd(Out.dir)
+# Create folder
+dir.create(samp)
+setwd(paste(Out.dir, samp, sep = "/"))
 
 
 
