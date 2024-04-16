@@ -824,7 +824,12 @@ legend("topright", legend = c("G1", "G2M", "S1"),
 
 
 (Takes a few minutes to run)
-```{r, warning=FALSE, message=FALSE}
+```{r, warning=FALSE, message=FALSE, eval=TRUE, include=FALSE}
+tic()
+sweep.res = paramSweep(S1, PCs = 1:15, sct = FALSE)
+toc()
+```
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
 tic()
 sweep.res = paramSweep(S1, PCs = 1:15, sct = FALSE)
 toc()
@@ -840,8 +845,6 @@ bc.mvn$pK <- unique(sweep.stats$pK); bc.mvn$ParamID <- 1:nrow(bc.mvn)
 
 
 ```{r, warning=FALSE, message=FALSE}
-
-
 x <- 0
 for (i in unique(bc.mvn$pK)) {
   x <- x + 1
