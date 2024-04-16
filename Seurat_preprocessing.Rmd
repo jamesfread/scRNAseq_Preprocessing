@@ -46,9 +46,13 @@ library(dplyr)
 library(scales)
 library(ggplot2)
 library(gridExtra)
+library(ggpubr)
 library(cowplot)
 library(glmGamPoi)
 library(harmony)
+library(DoubletFinder)
+library(SingleR)
+library(celldex)
 library(tictoc)
 ```
 
@@ -64,9 +68,13 @@ library(dplyr)
 library(scales)
 library(ggplot2)
 library(gridExtra)
+library(ggpubr)
 library(cowplot)
 library(glmGamPoi)
 library(harmony)
+library(DoubletFinder)
+library(SingleR)
+library(celldex)
 library(tictoc)
 ```
 # Set up
@@ -312,7 +320,7 @@ text(log(2000, 10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
 ### Exclude cell based on threshold
 
 ```{r, warning=FALSE, message=FALSE}
-keep.n <- qc$detected > 200
+keep.n <- qc$detected > 500
 keep.total <- qc$total > 200
 table(keep.total); table(keep.n)
 # exclude cells
@@ -437,5 +445,622 @@ print(plot_grid(plotColData(qc, x = "detected", y="subsets_Mito_percent", colour
 
 # Basic Seurat processing
 
+Creare Seurat object
 
-HERE!!! from line 237
+```{r, warning=FALSE, message=FALSE}
+S1 <- CreateSeuratObject(counts = assays(sce1)$counts,
+                         min.cells = 0, min.features = 0, project = samp)
+S1@meta.data$percent.mt <- colData(sce1)$subsets_Mito_percent
+S1@misc = list(rowData(sce1)$EnsemblID)
+
+```
+
+Check the Seurat object
+```{r}
+class(S1)
+Version(S1)
+dim(S1)
+```
+## Data normalisation
+Normalize the raw count data
+```{r, warning=FALSE, message=FALSE}
+S1 <- NormalizeData(S1, normalization.method = "LogNormalize",
+                    scale.factor = 10000, verbose = TRUE)
+# Find the most variable features
+S1 <- FindVariableFeatures(S1, selection.method = "vst", nfeatures = 2000, verbose = TRUE)
+top20 <- head(VariableFeatures(S1), 20)
+```
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("7)_", samp, "_Variable_genes_.png"), units="in", width=7.5, height=5, res=600)
+LabelPoints(plot = VariableFeaturePlot(S1), points = top20, repel = TRUE) + ggtitle(samp)
+invisible(dev.off())
+```
+
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.height=5}
+LabelPoints(plot = VariableFeaturePlot(S1), points = top20, repel = TRUE) + ggtitle(samp)
+```
+
+
+## Scale
+
+```{r, warning=FALSE, message=FALSE}
+S1 <- ScaleData(S1, features = rownames(S1), do.scale = TRUE,
+                do.center = TRUE, verbose = FALSE)
+```
+
+## Linear dimensional reduction (PCA)
+
+Run PCA
+```{r, warning=FALSE, message=FALSE}
+S1 <- RunPCA(S1, features = VariableFeatures(object = S1), verbose = FALSE)
+```
+
+plot top gene from first 2 components
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("8)_", samp, "_Gene_loadings_.png"), units="in", width=10, height=6, res=600)
+VizDimLoadings(S1, dims = 1:2, reduction = "pca") + ggtitle(samp)
+dev.off()
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=6}
+VizDimLoadings(S1, dims = 1:2, reduction = "pca") + ggtitle(samp)
+```
+Plot first 2 principal components
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("9)_", samp, "_PCA_.png"), units="in", width=5, height=5, res=600)
+DimPlot(S1, reduction = "pca") + ggtitle(samp) + NoLegend()
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=5, fig.height=5}
+DimPlot(S1, reduction = "pca") + ggtitle(samp) + NoLegend()
+```
+
+Heatmap - Component 1
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("10)_", samp, "_PC1_HM_.png"), units="in", width=7, height=5, res=600)
+DimHeatmap(S1, dims = 1, cells = 500, balanced = TRUE, fast = F) + ggtitle(samp)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7, fig.height=5}
+DimHeatmap(S1, dims = 1, cells = 500, balanced = TRUE, fast = F) + ggtitle(samp)
+```
+
+Heatmap - First 9 components
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("11)_", samp, "_PCs_HM_.png"), units="in", width=15, height=15, res=600)
+DimHeatmap(S1, dims = 1:9, cells = 500, balanced = TRUE)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=15, fig.height=15}
+DimHeatmap(S1, dims = 1:9, cells = 500, balanced = TRUE)
+```
+
+Elbow plot
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("12)_", samp, "_PCs_elbow_.png"), units="in", width=5, height=4, res=600)
+ElbowPlot(S1) + ggtitle(samp)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=5, fig.height=4}
+ElbowPlot(S1) + ggtitle(samp)
+```
+
+
+# Cell clustering
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(42)
+S1 <- FindNeighbors(S1, dims = 1:15, verbose = FALSE)
+S1 <- FindClusters(S1, resolution = 0.8, verbose =FALSE)
+```
+
+# Non-linear dimensional reduction (UMAP)
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(42)
+S1 <- RunUMAP(S1, dims = 1:15, verbose = FALSE)
+```
+
+Plot the UMAP
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("13)_", samp, "_UMAP.png"), units="in", width=5, height=5, res=600)
+DimPlot(S1, reduction = "umap", shuffle = TRUE, label = TRUE, label.size = 4) +
+  ggtitle(samp) + NoLegend()
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=5, fig.height=5}
+DimPlot(S1, reduction = "umap", shuffle = TRUE, label = TRUE, label.size = 4) +
+  ggtitle(samp) + NoLegend()
+```
+
+Find top cluster marker genes
+(may take a few minutes to run)
+```{r, warning=FALSE, message=FALSE}
+tic()
+S1.markers <- FindAllMarkers(S1, only.pos = TRUE, min.pct = 0.25,
+                             logfc.threshold = 0.25, verbose =T)
+toc()
+```
+
+
+Heatmap - top 10 genes per cluster
+```{r, warning=FALSE, message=FALSE}
+top10 <- S1.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+```
+
+Plot heatmap of the top marker genes
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("14)_", samp, "_Cluster_HM_.png"), units="in", width=15, height=10, res=600)
+DoHeatmap(S1, features = top10$gene, size = 3) + ggtitle(samp)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=15, fig.height=10}
+DoHeatmap(S1, features = top10$gene, size = 3) + ggtitle(samp)
+```
+
+
+T cell markers
+```{r, warning=FALSE, message=FALSE}
+p1 = FeaturePlot(S1, features = "CD3E", reduction = "umap", cols = c("grey80", "red2"))
+p2 = FeaturePlot(S1, features = "CD3G", reduction = "umap", cols = c("grey80", "red2"))
+p3 = FeaturePlot(S1, features = "CD4", reduction = "umap", cols = c("grey80", "red2"))
+p4 = FeaturePlot(S1, features = "CD8A", reduction = "umap", cols = c("grey80", "red2"))
+```
+
+Plot
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("15a)_", samp, "_T_cell_markers_.png"), units="in", width=10, height=8, res=600)
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=8}
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+```
+
+B cell markers
+
+```{r, warning=FALSE, message=FALSE}
+p1 = FeaturePlot(S1, features = "CD19", reduction = "umap", cols = c("grey80", "red2"))
+p2 = FeaturePlot(S1, features = "CD79A", reduction = "umap", cols = c("grey80", "red2"))
+p3 = FeaturePlot(S1, features = "IGHM", reduction = "umap", cols = c("grey80", "red2"))
+p4 = FeaturePlot(S1, features = "IGHD", reduction = "umap", cols = c("grey80", "red2"))
+```
+
+Plot
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("15b)_", samp, "_B_cell_markers_.png"), units="in", width=10, height=8, res=600)
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=8}
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+```
+
+
+NK cell markers
+```{r, warning=FALSE, message=FALSE}
+p1 = FeaturePlot(S1, features = "NKG7", reduction = "umap", cols = c("grey80", "red2"))
+p2 = FeaturePlot(S1, features = "GNLY", reduction = "umap", cols = c("grey80", "red2"))
+p3 = FeaturePlot(S1, features = "KLRB1", reduction = "umap", cols = c("grey80", "red2"))
+p4 = FeaturePlot(S1, features = "NCAM1", reduction = "umap", cols = c("grey80", "red2"))
+```
+
+Plot
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("15c)_", samp, "_NK_cell_markers_.png"), units="in", width=10, height=8, res=600)
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=8}
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+```
+
+
+Myeloid cell markers
+```{r, warning=FALSE, message=FALSE}
+p1 = FeaturePlot(S1, features = "CD14", reduction = "umap", cols = c("grey80", "red2"))
+p2 = FeaturePlot(S1, features = "LYZ", reduction = "umap", cols = c("grey80", "red2"))
+p3 = FeaturePlot(S1, features = "ITGAX", reduction = "umap", cols = c("grey80", "red2"))
+p4 = FeaturePlot(S1, features = "ITGAM", reduction = "umap", cols = c("grey80", "red2"))
+```
+
+Plot
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("15d)_", samp, "_Myeloid_markers_.png"), units="in", width=10, height=8, res=600)
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=8}
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+```
+
+
+pDC = CLEC4C, NRP1
+Treg = FOXP3, IL2RA
+HSPC = CD34
+
+
+
+Add crude labels to the cells
+
+```{r, warning=FALSE, message=FALSE}
+set.ct = c("0" = "CD4_T_cells", "1" = "CD4_T_cells", "2" = "CD8_T_cells", "3" = "B_cells",
+           "4" = "NK_cells", "5" = "NKT_cells", "6" = "CD4_T_cells", "7" = "B_cells",
+           "8" = "Mono/DC", "9" = "Mono/DC", "10" = "CD8_T_cells", "11" = "NK_cells", 
+           "12" = "CD4_T_cells", "13" = "B_cells", "14" = "UNKNOWN")
+
+S1@meta.data$CellType_0 = set.ct[as.character(S1$RNA_snn_res.0.8)]
+# See numbers of cells
+table(S1@meta.data$CellType_0)
+
+```
+
+
+Plot the UMAP with the crude cell type annotations
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("16)_", samp, "_UMAP_crude_CT.png"), units="in", width=5, height=5, res=600)
+DimPlot(S1, reduction = "umap", group.by = "CellType_0", alpha = 0.5, shuffle = TRUE,
+        label = TRUE, label.size = 5, repel = TRUE) + ggtitle(samp) + NoLegend()
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=5, fig.height=5}
+DimPlot(S1, reduction = "umap", group.by = "CellType_0", alpha = 0.5, shuffle = TRUE,
+        label = TRUE, label.size = 5, repel = TRUE) + ggtitle(samp) + NoLegend()
+```
+
+Piechart of crude cell types
+
+```{r, warning=FALSE, message=FALSE}
+pc1 = data.frame(table(S1@meta.data$CellType_0)); colnames(pc1) = c("Cell_type", "Number")
+
+# re-order
+pc1 = pc1[order(-pc1$Number), ]
+# Add propotion
+pc1$prop = round((pc1$Number / sum(pc1$Number))*100, 2)
+# Position
+pc1$Cell_type_n = paste0(pc1$Cell_type, " (n=", pc1$Number, ")")
+pc1$Cell_type_n = factor(pc1$Cell_type_n, levels = pc1$Cell_type_n)
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("17)_", samp, "_UMAP_crude_CT_pie.png"), units="in", width=5, height=5, res=600)
+ggplot(pc1, aes(x="", y=Number, fill=Cell_type_n)) + geom_bar(stat="identity", width=4) +
+  coord_polar("y", start=0, direction = -1) + theme_void()
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=5, fig.height=5}
+ggplot(pc1, aes(x="", y=Number, fill=Cell_type_n)) + geom_bar(stat="identity", width=4) +
+  coord_polar("y", start=0, direction = -1) + theme_void()
+```
+
+
+
+## Cell cycle phase
+
+```{r, warning=FALSE, message=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+S1 = CellCycleScoring(S1, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+```
+
+
+Plot the UMAP with the cell cycle phase
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("18)_", samp, "_UMAP_CC.png"), units="in", width=6, height=5, res=600)
+DimPlot(S1, reduction = "umap", group.by = "Phase") + ggtitle(samp)
+dev.off()
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
+DimPlot(S1, reduction = "umap", group.by = "Phase") + ggtitle(samp)
+```
+
+Plot stacked barplot of cell cycle phase
+
+Organise
+```{r, warning=FALSE, message=FALSE}
+org.dat = as.data.frame.matrix(table(data.frame(S1@meta.data$CellType_0, S1@meta.data$Phase)))
+# re-order
+org.dat$Total = org.dat$G1 + org.dat$G2M + org.dat$S
+org.dat = org.dat[order(-org.dat$Total), ]
+```
+
+Plot stacked barplot
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("19)_", samp, "_CC_bp.png"), units="in", width=10, height=5, res=600)
+barplot(t(org.dat[, 1:3]), col = c("#F8766D", "#0CB702", "#00A9FF"),
+        xlab="Cell type", ylab = "Number of cells")
+legend("topright", legend = c("G1", "G2M", "S1"),
+       col=c("#F8766D", "#0CB702", "#00A9FF"), pch=15, cex=1.2)
+invisible(dev.off())
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=5}
+barplot(t(org.dat), col = c("#F8766D", "#0CB702", "#00A9FF"),
+        xlab="Cell type", ylab = "Number of cells")
+legend("topright", legend = c("G1", "G2M", "S1"),
+       col=c("#F8766D", "#0CB702", "#00A9FF"), pch=15, cex=1.2)
+```
+
+
+
+# Remove doublets
+
+
+(Takes a few minutes to run)
+```{r, warning=FALSE, message=FALSE}
+tic()
+sweep.res = paramSweep(S1, PCs = 1:15, sct = FALSE)
+toc()
+```
+
+```{r, warning=FALSE, message=FALSE}
+sweep.stats = summarizeSweep(sweep.res, GT = FALSE)
+# Organise the outputs
+bc.mvn <- as.data.frame(matrix(0L, nrow = length(unique(sweep.stats$pK)), ncol = 5))
+colnames(bc.mvn) <- c("ParamID", "pK", "MeanBC", "VarBC", "BCmetric")
+bc.mvn$pK <- unique(sweep.stats$pK); bc.mvn$ParamID <- 1:nrow(bc.mvn)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+
+x <- 0
+for (i in unique(bc.mvn$pK)) {
+  x <- x + 1
+  ind <- which(sweep.stats$pK == i)
+  bc.mvn$MeanBC[x] <- mean(sweep.stats[ind, "BCreal"])
+  bc.mvn$VarBC[x] <- sd(sweep.stats[ind, "BCreal"])^2
+  bc.mvn$BCmetric[x] <- mean(sweep.stats[ind, "BCreal"])/(sd(sweep.stats[ind, "BCreal"])^2)}
+bc.mvn$pK_num = c(0.005, seq(0.01, ((nrow(bc.mvn)-1)/100), 0.01))
+```
+
+Get optimal pK value
+```{r, warning=FALSE, message=FALSE}
+opt.pK = bc.mvn[which(bc.mvn$BCmetric == max(bc.mvn$BCmetric)), "pK_num"]
+opt.pK
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+homotypic.prop = sum((table(Idents(S1))/sum(table(Idents(S1))))^2)
+nExp_poi <- round(0.05*ncol(S1)) ## Assuming 5% doublet rate from all cells
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+```
+
+
+Plot optimum pK value
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("20)_", samp, "_DF_optimum_pK.png"), units="in", width=6, height=5, res=600)
+plot(bc.mvn$pK_num, log(bc.mvn$BCmetric), ylab = "Log(metric)", xlab = "pK",
+     main = "Mean-variance normalized\nbimodality coefficient (log)",
+     pch = 19, type = 'b', col="dodgerblue2")
+abline(v=opt.pK, col=alpha("firebrick1", 0.5), lwd=3, lty=2)
+legend("topright", legend = paste("Optimum pK =", opt.pK), bty="n",
+       text.font = 2, text.col = alpha("firebrick1", 0.5))
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
+plot(bc.mvn$pK_num, log(bc.mvn$BCmetric), ylab = "Log(metric)", xlab = "pK",
+     main = "Mean-variance normalized\nbimodality coefficient (log)",
+     pch = 19, type = 'b', col="dodgerblue2")
+abline(v=opt.pK, col=alpha("firebrick1", 0.5), lwd=3, lty=2)
+legend("topright", legend = paste("Optimum pK =", opt.pK), bty="n",
+       text.font = 2, text.col = alpha("firebrick1", 0.5))
+```
+
+Run DoubletFinder
+```{r, warning=FALSE, message=FALSE}
+tic()
+seu1 <- doubletFinder(S1, PCs = 1:15, pN = 0.25, pK = opt.pK,
+                         nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = FALSE)
+toc()
+```
+add as metadata
+```{r, warning=FALSE, message=FALSE}
+# Check samples match
+identical(colnames(S1), colnames(seu1))
+
+S1$Doublet = seu1@meta.data[, ncol(seu1@meta.data)]
+# Number of doublets
+table(S1$Doublet)
+```
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("21)_", samp, "_DF_UMAP_Doublet.png"), units="in", width=6, height=5, res=600)
+DimPlot(S1, reduction = "umap", group.by = "Doublet", alpha = 0.4) + ggtitle(samp) +
+  scale_color_manual(values=c("black", "dodgerblue1"))
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
+DimPlot(S1, reduction = "umap", group.by = "Doublet", alpha = 0.4) + ggtitle(samp) +
+  scale_color_manual(values=c("black", "dodgerblue1"))
+```
+
+Subset to only singlets
+```{r, warning=FALSE, message=FALSE}
+S1 = subset(S1, Doublet == "Singlet")
+table(S1$Doublet)
+```
+
+
+# SingleR annotation
+
+Get Human references
+```{r, warning=FALSE, message=FALSE}
+tic()
+ref.HPCA = celldex::HumanPrimaryCellAtlasData()
+ref.BPE = celldex::BlueprintEncodeData()
+toc()
+```
+
+Extract data for input
+```{r, warning=FALSE, message=FALSE}
+indat = as.matrix(GetAssayData(object = S1, layer = "data"))
+# Create a vector of clusters
+clust = as.character(S1@meta.data$seurat_clusters)
+```
+
+Run main SingleR function for each reference
+```{r, warning=FALSE, message=FALSE}
+pred.HPCA <- SingleR(test = indat, ref = ref.HPCA, labels = ref.HPCA$label.main)
+pred.BPE <- SingleR(test = indat, ref = ref.BPE, labels = ref.BPE$label.main)
+# add results to Seurat object
+S1@meta.data$SingleR_HPCA = pred.HPCA$pruned.labels
+S1@meta.data$SingleR_BPE = pred.BPE$pruned.labels
+```
+
+Plot by the Human Primary Cell Atlas annotations
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("22a)_", samp, "_UMAP_SingleR_HPCA.png"), units="in", width=6, height=5,res=600)
+DimPlot(S1, reduction = "umap", group.by = "SingleR_HPCA") + ggtitle(samp)
+invisible(dev.off())
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
+DimPlot(S1, reduction = "umap", group.by = "SingleR_HPCA") + ggtitle(samp)
+```
+
+
+
+
+Plot by the Blueprint Encode annotations
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("22b)_", samp, "_UMAP_SingleR_BPE.png"), units="in", width=6, height=5, res=600)
+DimPlot(S1, reduction = "umap", group.by = "SingleR_BPE") + ggtitle(samp)
+invisible(dev.off())
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
+DimPlot(S1, reduction = "umap", group.by = "SingleR_BPE") + ggtitle(samp)
+```
+
+
+
+# Save sample
+
+Adding metadata now is helpful once samples have been integrated
+```{r, warning=FALSE, message=FALSE}
+S1$Sample = samp
+S1$Condition = "Baseline"
+```
+
+Export sample as .rds sample
+```{r, warning=FALSE, message=FALSE, echo=TRUE, eval=FALSE}
+# Not run
+setwd(paste(Out.dir, samp, sep = "/"))
+saveRDS(S1, paste(samp,"_Cleaned.rds", sep=""))
+```
+
+
+# Key metrics
+
+Number of cells
+```{r, warning=FALSE, message=FALSE}
+print("Number of cells")
+ncol(S1)
+```
+
+Number of genes detected
+```{r, warning=FALSE, message=FALSE}
+print("Number of genes detected")
+nrow(S1)
+```
+
+Total sample library size
+```{r, warning=FALSE, message=FALSE}
+sum(GetAssayData(object = S1, layer = "counts"))
+```
+
+
+
+Median counts per cell
+```{r, warning=FALSE, message=FALSE}
+print("Median counts per cell")
+q1 = summary(colSums(GetAssayData(object = S1, layer = "counts")))[[3]]; q1
+```
+
+Median genes per cell
+```{r, warning=FALSE, message=FALSE}
+print("Median genes per cell")
+q2 = summary(apply(GetAssayData(object = S1, layer = "counts"), 2,
+                   function(x) sum(x>0)))[[3]]; q2
+```
+
+Summary of Mitochodrial gene percentage per cell
+```{r, warning=FALSE, message=FALSE}
+print("Summary of Mitochodrial gene percentage per cell")
+q3 = summary(S1@meta.data$percent.mt); q3
+```
+
+Organize data
+```{r, warning=FALSE, message=FALSE}
+out.tab = data.frame(ncol(S1), nrow(S1), sum(GetAssayData(object = S1, layer = "counts")),
+                     q1, q2, round(q3[[3]], 3))
+colnames(out.tab) = c("No. cells", "No. genes", "Total library size",
+                      "Median counts/cell", "Median genes/cell", "Median mitochodrial") 
+rownames(out.tab) = samp
+ss <- tableGrob(t(out.tab))
+```
+
+Plot QC metrics
+```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
+setwd(paste(Out.dir, samp, sep = "/"))
+png(paste0("23)_", samp, "_Key_metrics.png"), units="in", width=3, height=3, res=600)
+grid.arrange(ss)
+invisible(dev.off())
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=3, fig.height=3}
+grid.arrange(ss)
+```
+
+# Session information
+
+```{r, warning=FALSE, message=FALSE}
+sessionInfo()
+```
