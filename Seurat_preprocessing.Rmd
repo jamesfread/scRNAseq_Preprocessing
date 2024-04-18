@@ -20,20 +20,20 @@ This QC pipeline is tailored for output data formats from CellRanger (10X), whic
 
 Whilst the QC metrics in this pipeline are fairly standard, they can be customized to suit the project (for example, adjusting the gene filter and mitochondrial gene proportion thresholds), and the pipeline can be adjusted to suit output formats from other scRNA-Seq platforms.
 
-After the sample names, input directory, and output directories are given in the first step, the rest of the script can be run together. This pipeline can also be converted into a function and then run as a loop to apply the same QC parameters to all sample of an scRNA-Seq project (Although the QC plots and metric should be assessed to confirm the parameters are appropriate for each sample). 
+After the sample names, input directory, and output directories are given in the first step, the rest of the script can be run together. This pipeline can also be converted into a function and then run as a loop to apply the same QC parameters to all samples in an scRNA-Seq project (although the QC plots and metric should be assessed to confirm the parameters are appropriate for each sample). 
 
-The outputs of this pipeline are the plots generated and a 'cleaned' version of the data saved as a Seurat object, ready for integration with other cleaned samples and downstream analysis.
+The outputs of this pipeline are the plots generated and a 'cleaned' version of the data saved as a Seurat object (or optionally as a SingleCellExperiment object), ready for integration with other cleaned samples and downstream analysis.
 
-This example uses the raw counts from CellRanger (10X) of a sample from the CAS study scRNA-Seq experiemnt. The sample was generated from Cord Blood Mononuclear cells (CBMC) and it was an untreated control (not stimulated with a model antigen). It takes approximately 20 minutes to run.
+This example uses the raw counts from CellRanger (10X) of a sample from the CAS study scRNA-Seq experiment. The sample was generated from Peripheral Blood Mononuclear cells (PBMC) collected from a 5 year old participant and it was an untreated control (not stimulated with any model antigen). It takes approximately 20 minutes to run.
 
 This pipeline contains the following sections:
-Sample set-up, Removal of empty droplets, Filtering of genes, Quality Control of cells, Basic Seurat pre-processing and data exploration, Cell cycle phase estimation, Doublet cell detection and removal, SingleR annotation, and key metrics and save sample.
+Sample set-up, Removal of empty droplets, Filtering of genes, Quality Control of cells, Basic Seurat pre-processing and data exploration, Cell cycle phase estimation, Doublet cell detection and removal, SingleR annotation, key metrics,  and save sample.
 
 \newpage
 
 ### Load packages
 
-Load the packages need for this analysis
+These are the R packages which will be used in this tutorial. If they are not already installed, they can be from the Bioconductor or CRAN. See session info at the end of this document for package versions.
 ```{r, echo=TRUE, eval=FALSE, warning=FALSE, message=FALSE}
 library(SingleCellExperiment)
 library(DropletUtils)
@@ -77,8 +77,12 @@ library(SingleR)
 library(celldex)
 library(tictoc)
 ```
+
 # Set up
 
+Set the "in" directory to where the CellRanger output is stored, and the "out" directory to where you want to save the QC plots and post-QC sample.
+
+The reason to define the input/output/sample name at the start of the pipeline makes it easier when processing multiple samples and allows automation of the process.
 ```{r, echo = FALSE, eval=TRUE}
 In.dir = "C:/Users/jread/Desktop/Work/Git/scRNAseq_Preprocessing/Data"
 Out.dir = "C:/Users/jread/Desktop/Work/Git/scRNAseq_Preprocessing/Output"
@@ -89,42 +93,50 @@ In.dir = "Path/To/scRNAseq_Preprocessing/Data"
 Out.dir = "Path/To/scRNAseq_Preprocessing/Output"
 ```
 
-
-# Choose sample
+Choose sample
 ```{r}
 samp = "Donor2"
 ```
 
-# Import files
+### Import files
+
+Three data outputs of CellRanger are used as input:
+  1) "matrix.mtx" - large data matrix of gene counts per cell
+  2) "barcodes.tsv" - list of 'barcodes' which represent single cells and corresponds to the columns of the count matrix
+  3) "features.tsv" - list of features (gene names) that correspond to the rows of the count matrix
+
+
+For this examples, the barcodes and features file can be taken directly from github, but the counts matrix will have to be downloaded and stored locally in the "in" directory location as it's too large.
 
 Barcodes
 ```{r}
 
 Barcodes <- read.table("https://raw.githubusercontent.com/jamesfread/scRNAseq_Preprocessing/main/Data/Donor2_5yr_Unstim_barcodes.tsv", sep = "\t")
-dim(Barcodes)
-head(Barcodes)
+dim(Barcodes) # check dimensions
 ```
 
 Features
 ```{r}
 Genes = read.table("https://raw.githubusercontent.com/jamesfread/scRNAseq_Preprocessing/main/Data/Donor2_5yr_Unstim_features.tsv", sep = "\t")
-dim(Genes)
-head(Genes)
+dim(Genes) # check dimensions
 ```
 
+Raw counts matrix
 ```{r, warning=FALSE, message=FALSE}
 setwd(In.dir)
 data.matrix <- readMM(paste0(samp, "_5yr_Unstim_matrix.mtx"))
-dim(data.matrix)
+dim(data.matrix) # check dimensions
 ```
-Annotate count matrix
+
+Annotate the counts matrix with the gene identifier (EnsemblID) and unique barcode.
 ```{r}
 rownames(data.matrix) = Genes$V1; colnames(data.matrix) = Barcodes$V1
 
 ```
 
-## Create output directory
+### Create output directory
 
+Create an new folder inside the output directory to store the outputs of the QC run
 ```{r, warning=FALSE, message=FALSE}
 setwd(Out.dir)
 dir.create(samp)
@@ -133,6 +145,11 @@ dir.create(samp)
 
 # Remove 'empty' droplets
 
+The first step is to remove 'empty drops'. 10X technology will attempt to sequence RNA libraries in all droplets detected, regardless of whether they actually contain a cell.
+This is why there are often > 1 million 'potential' cells, when in reality there are generally 3000-6000 actual single cells captured for a scRNA-Seq sample.
+
+We can visualize barcodes which are empty versus those which contain a cell with the *barcodeRanks* function from the DropletUtils package. Essentially, barcodeRanks ranks each potential cell by its total Unique Molecular Identifier (UMI) count detected, which can be plotted against the total UMI count to create a curve (generally a 'backwards S' shape). The terms UMI, feature and gene are generally synonymous at this stage of scRNA-Seq processing.
+
 ```{r}
 bcrank = barcodeRanks(data.matrix)
 # create index of unique data points for plotting (so not plotting hundreds of points on to of each other.)
@@ -140,6 +157,10 @@ uniq = !duplicated(bcrank$rank)
 ```
 
 Plot the curve. Use 'uniq' index to avoid duplicate data points.
+
+barcodeRanks also computes two points in the curve:
+  knee point - where the curve first notably bends indicating roughly the change from cell-containg droplets to droplets containing residual/ambient RNA
+  Inflection point - point where the curve starts to level off the other way.
 ```{r, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("1)_", samp, "_Knee_plot.png"), units="in", width=5, height=5, res=600)
@@ -163,8 +184,13 @@ legend("bottomleft", legend = c("Knee", "inflection"),
        col=c("dodgerblue", "darkgreen"), lty=2, cex=1.2)
 
 ```
+The knee point (blue dashed line) is where the curve starts to drop of the cliff.
+The cliff represent the change from cell-containing droplets to ambient RNA-containing droplets, which would be most of the >1million potential cells, and so they are ranked close together (forming the cliff face) 
 
-Run emptyDrops function
+We can use the *emptyDrops* function to identify and remove droplets which do not contain a cell. emptyDrops creates an estimate of the ambient RNA droplet profile from droplet which contains less that a certain number of genes; we can use the inflection point as we know its in the ambient RNA zone.
+
+Droplets which contain a cell are identified as barcodes which significantly deviate from the ambient profile. The analysis is run with 10,000 Monte Carlo iterations (niter). 
+
 ```{r, warning=FALSE, message=FALSE}
 set.seed(42) # Set seed for reproducibility
 e.out <- emptyDrops(data.matrix, lower = metadata(bcrank)$inflection, niters = 10000)
@@ -176,10 +202,20 @@ data.matrix <- data.matrix[,which(e.out$FDR<=0.01)]
 # Number of cell captured
 ncol(data.matrix)
 ```
+Only 6,279 barcodes of the original >1 million are predicted to contain a single cell, and these will be carried forward for analysis.
+
+Note: CellRanger has an option to filter out empty droplets as well. If used this would be apparent in the size of the input data matrix, and removing empty droplets would not be necessary.
+\newpage
 
 # Filter genes
 
+The next step is to remove genes which are not informative.
+This is an initial filter and several downstream analyses may require further gene filtering.
+
 ### Create SingleCellExperiment (SCE) object
+
+For this step we will convert the data matrix into a framework (object) made for scRNA-Seq data. Several such object classes exist, perhaps the most well-known of which is the Seurat object from the Seurat pipeline (discussed below).
+These objects are a convenient way to store large gene expression data sets (scRNA-Seq raw/normalised/scaled/etc counts) alongside information about the cells and genes (metadata).
 
 ```{r, warning=FALSE, message=FALSE}
 sce <- SingleCellExperiment(assays = list(counts = as.matrix(data.matrix)))
@@ -187,16 +223,17 @@ sce <- SingleCellExperiment(assays = list(counts = as.matrix(data.matrix)))
 colData(sce)$Barcode <- colnames(data.matrix)
 rowData(sce)$EnsemblID <- rownames(data.matrix) # EnsemblID
 rowData(sce)$GeneID <- Genes$V2 # gene name
-```
-
-Make sure row names are unique
-```{r}
-rownames(sce) <- uniquifyFeatureNames(rowData(sce)$EnsemblID, rowData(sce)$GeneID)
-
 dim(sce)
 ```
 
-create index of genes with at least one count
+There are a total of 36601 genes in the data set
+
+Optional if necessary, make sure row names are unique
+```{r}
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$EnsemblID, rowData(sce)$GeneID)
+```
+
+First, remove genes which are not expressed in any cell
 ```{r, warning=FALSE, message=FALSE}
 keep <- rowSums(counts(sce)>0)>0
 # subset data set
@@ -204,8 +241,9 @@ sce <- sce[keep,]
 # number of genes remaining
 nrow(sce)
 ```
+This removed 12,263 genes which were not expressed by any cell.
 
-Filter genes to those expressed in at least 1% of cells.
+Next, retain only those genes which are expressed in at least 1% of our cells, which could be considered the proportion of a rare cell population. This parameter can be altered to be more conservative or lenient.
 ```{r, warning=FALSE, message=FALSE}
 ## 1% of cells
 ncol(sce)*0.01
@@ -216,11 +254,21 @@ sce <- sce[keep_feature,]
 # number of genes remaining
 nrow(sce)
 ```
+This step removed a further 11,861 genes which were only sporadically expressed.
+
+After removing empty droplets and filtering genes, the data set contains
+gene expression data for 6,279 cells and 12,477 genes
+```{r, warning=FALSE, message=FALSE}
+dim(sce)
+```
 
 # Quality control of cells
 
+The next step is to explore and evaluate the data, and remove poor quality cells based on several metrics.
+
 ### Check chromosome information
 
+Map the chromosome that each gene (using EnsemblID) is found on to see irregularities. For human data use the org.Hs.eg.db package, for mouse data use the org.Mm.eg.db package.
 ```{r, warning=FALSE, message=FALSE}
 map <- mapIds(org.Hs.eg.db, keys = as.character(rowData(sce)$EnsemblID),
               column = "CHR", keytype = "ENSEMBL")
@@ -251,11 +299,15 @@ barplot(p1$Freq, main = paste(samp,"\nFeatures per chromosome"), xlab = "Chromos
         names.arg = p1$Var1)
 ```
 
+We can see that chromosome 1 has the most genes associated and other chromosome have various numbers of associated genes. We can also see that the X chromosome has representation but the Y chromosome does not, indicating that this sample was collected from a female participant.
+
+There are also 13 mitochondrial genes detected, more on this later.
 Summary of chromosomes
 ```{r}
 summary(map=="MT")
 ```
-Organise and add mitochondrial (and ribosomal) gene info into the data set with the addPerCellQCMetrics function.
+### QC metrics
+Add QC metrics to the SingleCellExperiment object with the *addPerCellQC* function from the scuttle package. Also adding the proportion of mitochondrial (MT) and ribosomal (RP) genes, based on the gene name prefix.
 ```{r, warning=FALSE, message=FALSE}
 mt_genes <- grep("^MT-", rownames(sce), ignore.case = TRUE, value = TRUE)
 rb_genes <- grep("^RPS|^RPL", rownames(sce), ignore.case = TRUE, value = TRUE)
@@ -263,10 +315,13 @@ controls <- list(Mito = mt_genes, Ribo = rb_genes)
 qc <- addPerCellQC(sce, subsets=controls, rownames(sce))
 ```
 
-Plot histogram of the number of (unique) genes per cell
+Plot the (log10) number of unique genes per cell and number of transcripts per cell.
+Cells with a low number of genes represented and total transcript counts (or genes with lots of transcripts representing only a few genes) are considered poor quality and should be removed.
+
+Unique genes per cell:
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
-png(paste0("3a)_", samp, "_genes_hist.png"), units="in", width=7.5, height=5, res=300)
+png(paste0("3a)_", samp, "_genes_hist.png"), units="in", width=7.5, height=5, res=600)
 hist(log(qc$detected, 10),
      main = paste(samp, "- No. features (Log10)\n[Number of unique genes per cell]"),
      xlab = "Log10 Unique Features", breaks = 50, col = "cyan", border = "grey")
@@ -289,10 +344,10 @@ text(log(1000,10),75, "1000", col = alpha("red", 0.5), adj = 1, cex=0.6)
 text(log(2000,10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
 ```
 
-Plot histogram of the number of transcripts per cell
+Total transcripts per cell:
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
-png(paste0("3b)_", samp, "_transcripts_hist.png"), units="in", width=7.5, height=5, res=300)
+png(paste0("3b)_", samp, "_transcripts_hist.png"), units="in", width=7.5, height=5, res=600)
 hist(log(qc$total, 10),
      main = paste(samp, "- Library size (Log10)\n[Number of transcripts per cell]"),
      xlab = "Log10 Total counts", breaks = 50, col = "cyan", border = "grey")
@@ -317,20 +372,27 @@ text(log(1000,10),75, "1000", col = alpha("red", 0.5), adj = 1, cex=0.6)
 text(log(2000, 10),100, "2000", col = alpha("red", 0.5), adj = 1, cex=0.6)
 ```
 
-### Exclude cell based on threshold
+The plots show a relatively normal distribution, which is what we want, with a bit of a left skew indicating that there are some cells with low unique gene/transcript counts.
 
+We will remove cells which have less than 1000 unique gene detected and/or less that 2000 total transcripts detected. These numbers can be shifted depending on the distributions.
 ```{r, warning=FALSE, message=FALSE}
-keep.n <- qc$detected > 500
-keep.total <- qc$total > 200
+keep.n <- qc$detected > 1000
+keep.total <- qc$total > 2000
 table(keep.total); table(keep.n)
 # exclude cells
 qc.f <- qc[,keep.total & keep.n]
 dim(qc.f)
 ```
+Here, 6,074 cells are retained for analysis.
 
 ## Remove cell with high mitochondrial content
+There are only 13 protein-encoding mitochondrial genes and these are generally highly expressed (relative to their number) (1). It is necessary to remove cells which have high mitochondrial gene representation, as this is often a sign of a poor quality cell.
+However, mitochondrial gene proportion is highly context specific (e.g. between cell types and condition - tumour cell versus healthy). Previously, this has been dealt with by applying a strict QC threshold (usually 5 or 10%). This is no longer recommended as it excludes many viable cells which exist with high mitochondrial content (as can be seen where a 5% threshold would be in the plots below) (2). It is better to apply an adaptive threshold which is customized for each experiment.
 
-Get mitochondrial content
+Below, high mitochondrial content cells are treated as outliers with the threshold determined as the median proportion + 3x the median absolute deviation (a non-parametric version of 3 standard deviations above the mean).
+Similarly, ribosomal genes generally exhibit high expression, although this is more stable.
+
+Plot mitochondrial gene content of each cell
 ```{r}
 q.met = qc.f$subsets_Mito_percent
 ```
@@ -338,7 +400,7 @@ q.met = qc.f$subsets_Mito_percent
 Plot 
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
-png(paste0("4)_", samp, "_mito_thresh.png"), units="in", width=5, height=5, res=300)
+png(paste0("4)_", samp, "_mito_thresh.png"), units="in", width=5, height=5, res=600)
 plot(log10(qc.f$total), q.met, xlab = "Log10(Total genes)",
      ylab = "Mitochondrial genes (%)",
      pch = 21, col = "black", bg = alpha("grey50", 0.5),
@@ -378,12 +440,12 @@ legend("topright", legend = paste("Excluded (n=", in.out[[1]], ")",sep=""),
 legend("bottomright", legend = paste("Retained (n=", in.out[[2]], ")",sep=""),
        bty='n', text.col = "grey30", cex=0.7, text.font=2)
 ```
+The adaptive threshold for this sample was 14.66% mitochondrial content, which removes 76 cells.
 
 Remove the cells with high mitochondrial content
 ```{r}
 sce1 = qc.f[, (q.met < (median(q.met) + 3*mad(q.met)))]
 ```
-
 
 Plot histogram of genes after removing cells for mitochondrial content
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
@@ -418,9 +480,7 @@ hist(log(sce1$total, 10),
      xlab = "Log10 Total counts", breaks = 50, col = "cyan", border = "grey")
 ```
 
-
 Plot filtered genes with mitochondrial and ribosomal content.
-
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("6)_", samp, "_Filtered_genes_.png"), units="in", width=10, height=5, res=600)
@@ -441,12 +501,16 @@ print(plot_grid(plotColData(qc, x = "detected", y="subsets_Mito_percent", colour
             scale_x_log10(limits = c(50,10000)) + ylim(0,70) +
             stat_density2d(colour = "black", bins = 10), ncol = 2))
 ```
-
+This plot shows the cell before and after exclusion by mitochondrial content, and also revels relationships between mitochondrial geen proportion, number of genes detected, and Ribosomal gene proportion
 
 # Basic Seurat processing
+The next step is to apply some of the standard QC process and visualization provided by the Seurat pipeline (3, 4, 5, 6).
 
-Creare Seurat object
+Seurat has emerged as a leader in general QC and exploratory analysis of scRNA-Seq data set. Raul Satija's group maintains an extensive repository of methods and tutorial vignettes, and are actively developing new method to meet the challenges of scRNAseq data analysis.
 
+### Convert to Seurat object
+Set the *min.cells* and *min.features* arguments to '0', as these have been addressed above.
+Add in the mitochondrial and ribosomal gene proportions as metadata, and can put the EnsemblID's into a miscelaneous slot.
 ```{r, warning=FALSE, message=FALSE}
 S1 <- CreateSeuratObject(counts = assays(sce1)$counts,
                          min.cells = 0, min.features = 0, project = samp)
@@ -456,13 +520,16 @@ S1@misc = list(rowData(sce1)$EnsemblID)
 ```
 
 Check the Seurat object
+
+This shows that the object is a Seurat version 5 object (Seurat v5), which has substantial differences compared to previous versions of Seurat objects.
 ```{r}
 class(S1)
 Version(S1)
 dim(S1)
 ```
 ## Data normalisation
-Normalize the raw count data
+
+During the sequencing process, reverse transcription is necessary to convert RNA to complementary DNA (cDNA) for use in amplification, but this introduces bias as some genes may experience preferential amplification, leading to uneven representation in the data. Normalization approaches aim to reduce the technical noise or bias intrinsic to all scRNA-Seq data sets. For this QC step, it's sufficient to do a log normalization with a scaling factor (other approaches such as scTransform may be more appropriate for downstream analysis). Here, will also determine the 2,000 most variable genes in the sample.
 ```{r, warning=FALSE, message=FALSE}
 S1 <- NormalizeData(S1, normalization.method = "LogNormalize",
                     scale.factor = 10000, verbose = TRUE)
@@ -471,7 +538,7 @@ S1 <- FindVariableFeatures(S1, selection.method = "vst", nfeatures = 2000, verbo
 top20 <- head(VariableFeatures(S1), 20)
 ```
 
-
+Plot the most variable genes
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("7)_", samp, "_Variable_genes_.png"), units="in", width=7.5, height=5, res=600)
@@ -479,14 +546,18 @@ LabelPoints(plot = VariableFeaturePlot(S1), points = top20, repel = TRUE) + ggti
 invisible(dev.off())
 ```
 
-
-
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=7.5, fig.height=5}
 LabelPoints(plot = VariableFeaturePlot(S1), points = top20, repel = TRUE) + ggtitle(samp)
 ```
 
+Can see that many of the most variable genes are related to the immune system (e.g. CXCL5, IL1B), as expected.
 
-## Scale
+## Data Scaling
+Many of the following steps are based of Principal Compopnent Analysis (PCA), which finds linear combinations (called 'components') that maximize variation, and is well suited to finding the largest natural sources of variation in a data set. However, it is sensitive to the variation within each feature (gene) so that will prioritize a gene's importance if they have a range of high expression values (e.g. 1000-5000 transcripts) compared to a range of low expression values (e.g. 5-10), even if the magnitude of a gene's expression is unrelated to it's function (as is often the case). 
+
+To address this, the data is scaled and centered so that each gene has mean of 0 and standard deviation of 1 (z-score transformation), and therefore are not 'judged' by their expression magnitude, but their variation across the data set.
+
+Note: For several of the following steps, *verbose* has been set to FALSE. If set to TRUE, this parameter will display text printout relevant to the analysis, which is often helpful.
 
 ```{r, warning=FALSE, message=FALSE}
 S1 <- ScaleData(S1, features = rownames(S1), do.scale = TRUE,
@@ -494,24 +565,30 @@ S1 <- ScaleData(S1, features = rownames(S1), do.scale = TRUE,
 ```
 
 ## Linear dimensional reduction (PCA)
+Perform and plot a principal component analysis (PCA), visualizing the top genes associated with the first two components.
 
-Run PCA
 ```{r, warning=FALSE, message=FALSE}
 S1 <- RunPCA(S1, features = VariableFeatures(object = S1), verbose = FALSE)
 ```
 
-plot top gene from first 2 components
+plot top gene from first 2 components.
+
+The first PC shows a mix of immune-related genes and the second PC is dominated by B cell markers and HLA genes. This indicates that immune cell phenotypes (i.e., cell types) are the dominant source of variation in the data set, which is what you expect from scRNA-Seq data. 
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("8)_", samp, "_Gene_loadings_.png"), units="in", width=10, height=6, res=600)
 VizDimLoadings(S1, dims = 1:2, reduction = "pca") + ggtitle(samp)
-dev.off()
+invisible(dev.off())
 ```
 
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=6}
 VizDimLoadings(S1, dims = 1:2, reduction = "pca") + ggtitle(samp)
 ```
-Plot first 2 principal components
+
+Plot the first 2 principal components.
+
+This plot show that the first two PCs are associated with small sub-clusters, which likely represent cell types with highly variable transcriptomic profiles (compared to the main group)
+
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("9)_", samp, "_PCA_.png"), units="in", width=5, height=5, res=600)
@@ -523,8 +600,11 @@ invisible(dev.off())
 DimPlot(S1, reduction = "pca") + ggtitle(samp) + NoLegend()
 ```
 
-Heatmap - Component 1
+### Heatmap
 
+Component 1
+
+Can also plot a heatmap of the top 30 genes associated with any component.
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("10)_", samp, "_PC1_HM_.png"), units="in", width=7, height=5, res=600)
@@ -536,7 +616,11 @@ invisible(dev.off())
 DimHeatmap(S1, dims = 1, cells = 500, balanced = TRUE, fast = F) + ggtitle(samp)
 ```
 
-Heatmap - First 9 components
+First 9 components
+
+Can also visualize other relevant components.
+
+Here, can see some cell type (e.g. B and NK cells markers on PC3 & 4) and activation markers in the first few components.
 
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
@@ -549,8 +633,9 @@ invisible(dev.off())
 DimHeatmap(S1, dims = 1:9, cells = 500, balanced = TRUE)
 ```
 
-Elbow plot
+### Elbow plot
 
+Elbow plot of the PC standard deviation give a sense of how much variation can be accounted for across the top components.
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("12)_", samp, "_PCs_elbow_.png"), units="in", width=5, height=4, res=600)
@@ -562,8 +647,15 @@ invisible(dev.off())
 ElbowPlot(S1) + ggtitle(samp)
 ```
 
+After about 6 or 7 components, the standard deviation begins to level off, indicating that latter component accounts for a negligible amount of the variation. Several of the next plots are based off the PCA analysis and the components. In particular, the number of PCs to use for non-linear dimensionality reduction and clustering, which can be estimated from the elbow plot. Here we will use up to 15 PCs in downstream steps as we know that captures most of the variation.
 
-# Cell clustering
+## Cell clustering
+
+Do some preliminary clustering by constructing a shared nearest neighbor (SNN) graph (*FindNeighbors*) and then clustering with the Louvain method (standard for Seurat pipeline), using a resolution of 0.8 in the *FindClusters* function to identify the main clusters. 
+
+It is important to test a few resolutions to detemine the best fit for a given sample. Ultimately, if the resolution is too low, distinct cell (sub)types will be grouped together, and if the resolution is too high (more clusters), the clusters may become arbitrary and create subclusters with have no real biological basis. Over or under-estimating the clustering resolution will result in inaccurate inferences from downstream analysis. In general, the clusters should closely match the visible modularity of the UMAP visualization. A little over estimation of the resolution resulting in some of the large clusters being arbitrarily subclustered (as below) can be fixed by joining those clusters later. 
+
+In this example, the clustering and subsequent cell annotation will only be used for QC purposes to make sure the sample looks like we would expect it to. In a full-scale study, clustering and cell annotation used for analysis would occur after multiple samples have been integrated, and ensuring an appropriate resolution become a critical step.
 
 ```{r, warning=FALSE, message=FALSE}
 set.seed(42)
@@ -571,8 +663,15 @@ S1 <- FindNeighbors(S1, dims = 1:15, verbose = FALSE)
 S1 <- FindClusters(S1, resolution = 0.8, verbose =FALSE)
 ```
 
-# Non-linear dimensional reduction (UMAP)
+## Non-linear dimensional reduction (UMAP)
 
+Determine the Uniform Manifold Approximation and Projection (UMAP) dimensionality reduction coordinates, based off the PCA, and plot with the clusters determined above (7). This can also be done with tSNE reduction, but UMAP is generally the standard.
+
+It should be noted that UMAP (and tSNE) are not robust and precise measures of the data, and can often lead to mis-classification and errors in downstream analysis. Ultimately, unlike PCA which is a linear reduction, UMAP/tSNE's non-linear nature means that the cell embeddings are not truly quantitative, but rather have an element of randomness (which is the point; to reduce high dimensional data down to a few representational dimensions that are interpretable to human eyes) (read Lior Patcher's work for a better understanding [PMID: 37590228]).
+
+Therefore, UMAP should be used for visualizing and assessing the data, and carrying the UMAP-defined coordinate forward for downstream analysis should be avoided, if possible (although this practice is routine).
+
+In this example, the cells cluster into 6 distinct groups.
 ```{r, warning=FALSE, message=FALSE}
 set.seed(42)
 S1 <- RunUMAP(S1, dims = 1:15, verbose = FALSE)
@@ -592,17 +691,22 @@ DimPlot(S1, reduction = "umap", shuffle = TRUE, label = TRUE, label.size = 4) +
   ggtitle(samp) + NoLegend()
 ```
 
-Find top cluster marker genes
+### Marker genes
+
+Determine the top marker genes per cluster using the *FindAllMarkers* function. For this quick scan, use a Wilcoxon signed rank test (default) as it's relatively fast and setting the minimum percentage of cells expressing the genes and the log fold change threshold to 0.25 
+
 (may take a few minutes to run)
 ```{r, warning=FALSE, message=FALSE}
 tic()
 S1.markers <- FindAllMarkers(S1, only.pos = TRUE, min.pct = 0.25,
-                             logfc.threshold = 0.25, verbose =T)
+                             logfc.threshold = 0.25, verbose =F)
 toc()
 ```
 
+### Heatmap - top 10 genes per cluster
 
-Heatmap - top 10 genes per cluster
+Plot a heatmap of the top 10 genes upregulated per cluster, as determined above. Rows are genes and columns are cells. The heatmap is ordered by the number of cells per cluster.
+
 ```{r, warning=FALSE, message=FALSE}
 top10 <- S1.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
 ```
@@ -619,6 +723,11 @@ invisible(dev.off())
 DoHeatmap(S1, features = top10$gene, size = 3) + ggtitle(samp)
 ```
 
+In this examples, the cell types which correspond to each cluster are starting to become apparent from their canonical marker genes; e.g. clusters 0 & 1 = T cell, cluster 2 = B cell, cluster 5 & 6 = NK cell, cluster 8 & 9 = monocyte/macrophage)
+
+### Confirm with expression plots
+
+Plot some of the canonical marker genes over the UMAP projection to show which cells/clusters express them.
 
 T cell markers
 ```{r, warning=FALSE, message=FALSE}
@@ -641,7 +750,6 @@ ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
 ```
 
 B cell markers
-
 ```{r, warning=FALSE, message=FALSE}
 p1 = FeaturePlot(S1, features = "CD19", reduction = "umap", cols = c("grey80", "red2"))
 p2 = FeaturePlot(S1, features = "CD79A", reduction = "umap", cols = c("grey80", "red2"))
@@ -660,7 +768,6 @@ invisible(dev.off())
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=8}
 ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
 ```
-
 
 NK cell markers
 ```{r, warning=FALSE, message=FALSE}
@@ -681,7 +788,6 @@ invisible(dev.off())
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=8}
 ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
 ```
-
 
 Myeloid cell markers
 ```{r, warning=FALSE, message=FALSE}
@@ -704,26 +810,54 @@ ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
 ```
 
 
-pDC = CLEC4C, NRP1
-Treg = FOXP3, IL2RA
-HSPC = CD34
+The above plot show the expression of several of the canonical marker genes for the major cells types expected to be present in this sample (PBMC). For the purpose of QC, this is enough to get an estimation of the relative proportions of the cell types present to make sure that it looks as expected. However, marker genes for rarer cell types (e.g., CLEC4C, NRP1 for pDCs), subtypes (e.g., FOXP3 for Tregs), or tissue-specific cell types could also be considered for the context of the sample.
 
 
+### cluster-specific markers
 
-Add crude labels to the cells
+The Seurat pipeline also has the *FindMarkers* function to identify top marker genes for any particular cluster. This function essentially perform a diffferential expression analysis between clusters and there are several apporoaches which can be used (identified in the "test.use" call). Here, usinging the Wilcoxon Rank Sum test (note, this function run's much quicker if the **presto** package is installed).
+
+Testing one cluster against all others
+```{r, warning=FALSE, message=FALSE}
+# find markers of cluster 13
+c13.mkrs <- FindMarkers(S1, ident.1 = 13, test.use = "wilcox")
+```
+
+See the top 10 results.
 
 ```{r, warning=FALSE, message=FALSE}
-set.ct = c("0" = "CD4_T_cells", "1" = "CD4_T_cells", "2" = "CD8_T_cells", "3" = "B_cells",
-           "4" = "NK_cells", "5" = "NKT_cells", "6" = "CD4_T_cells", "7" = "B_cells",
+head(c13.mkrs, n = 10)
+```
+
+In this example, the smallest cluster (13) shows evidence that related to the bigger monocyte/DCs nearby as a gene associated with lysosomes is the top hit (LAMP3) and CCL22, which is expressed by dendritic cells and macrophages, is in the list.
+
+Can also test one cluster af=gainst one (or more) other cluster(s) by identifying "ident.2". Here, testing the difference between the two major B cell clusters.
+
+```{r, warning=FALSE, message=FALSE}
+c2vc7.mkrs <- FindMarkers(S1, ident.1 = 2, ident.2 = 7, test.use = "wilcox")
+```
+
+The top markers suggest that these two B cell clusters differ in their expression of IgM and IgD.
+```{r, warning=FALSE, message=FALSE}
+head(c2vc7.mkrs, n = 5)
+```
+
+
+## Cell type annotations
+
+From the above marker genes, Can add crude labels to the cells by cluster
+
+```{r, warning=FALSE, message=FALSE}
+set.ct = c("0" = "CD4_T_cells", "1" = "CD4_T_cells", "2" = "B_cells", "3" = "CD4_T_cells",
+           "4" = "CD8_T_cells", "5" = "NK_cells", "6" = "NKT_cells", "7" = "B_cells",
            "8" = "Mono/DC", "9" = "Mono/DC", "10" = "CD8_T_cells", "11" = "NK_cells", 
-           "12" = "CD4_T_cells", "13" = "B_cells", "14" = "UNKNOWN")
+           "12" = "B_cells", "13" = "Mono/DC")
 
 S1@meta.data$CellType_0 = set.ct[as.character(S1$RNA_snn_res.0.8)]
 # See numbers of cells
 table(S1@meta.data$CellType_0)
 
 ```
-
 
 Plot the UMAP with the crude cell type annotations
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
@@ -739,11 +873,10 @@ DimPlot(S1, reduction = "umap", group.by = "CellType_0", alpha = 0.5, shuffle = 
         label = TRUE, label.size = 5, repel = TRUE) + ggtitle(samp) + NoLegend()
 ```
 
-Piechart of crude cell types
+Can also plot a pie chart of crude cell types to get a feeling of the relative proportions of the cells types
 
 ```{r, warning=FALSE, message=FALSE}
 pc1 = data.frame(table(S1@meta.data$CellType_0)); colnames(pc1) = c("Cell_type", "Number")
-
 # re-order
 pc1 = pc1[order(-pc1$Number), ]
 # Add propotion
@@ -766,9 +899,17 @@ ggplot(pc1, aes(x="", y=Number, fill=Cell_type_n)) + geom_bar(stat="identity", w
   coord_polar("y", start=0, direction = -1) + theme_void()
 ```
 
-
+This plot shows that the broad cell type proportions are approximately what would be expected from PBMC samples (i.e., >50% T cell, ~20% B cells, ~10% Mono/DC, etc)
 
 ## Cell cycle phase
+
+The cell cycle phase usually contributes a significant proportion of the variability in gene expression in scRNA-Seq data sets. This can often define clustering more strongly that cell type differences, depending on the experimental context (e.g. proliferating cells) (8).
+
+The cell cycle phase can be estimated and accounted for in downstream analysis, if required (although it if often biologically relevant).
+
+The *CellCycleScoring* function assigns a cell cycle phase score for each cell in the data set to estimate the different stages present. Here using the S and G2M phase reference genes (others are designated G1 phase) for human data. For mouse data, conversion code is available.
+
+Note; a few of the cell cycle reference genes have probably been removed from the gene filter, so a warning may come up.
 
 ```{r, warning=FALSE, message=FALSE}
 s.genes <- cc.genes$s.genes
@@ -776,20 +917,21 @@ g2m.genes <- cc.genes$g2m.genes
 S1 = CellCycleScoring(S1, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
 ```
 
-
 Plot the UMAP with the cell cycle phase
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("18)_", samp, "_UMAP_CC.png"), units="in", width=6, height=5, res=600)
 DimPlot(S1, reduction = "umap", group.by = "Phase") + ggtitle(samp)
-dev.off()
+invisible(dev.off())
 ```
 
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
 DimPlot(S1, reduction = "umap", group.by = "Phase") + ggtitle(samp)
 ```
 
-Plot stacked barplot of cell cycle phase
+The plot shows that most clusters are composed of all cell cycle phases, with the exception of monocytes, which is defined by the G1 phase.
+
+Plot stacked barplot of cell cycle phase for each cell type to visualise the relative proportion of the three phases
 
 Organise
 ```{r, warning=FALSE, message=FALSE}
@@ -810,9 +952,8 @@ legend("topright", legend = c("G1", "G2M", "S1"),
 invisible(dev.off())
 ```
 
-
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=10, fig.height=5}
-barplot(t(org.dat), col = c("#F8766D", "#0CB702", "#00A9FF"),
+barplot(t(org.dat[, 1:3]), col = c("#F8766D", "#0CB702", "#00A9FF"),
         xlab="Cell type", ylab = "Number of cells")
 legend("topright", legend = c("G1", "G2M", "S1"),
        col=c("#F8766D", "#0CB702", "#00A9FF"), pch=15, cex=1.2)
@@ -821,9 +962,22 @@ legend("topright", legend = c("G1", "G2M", "S1"),
 
 
 # Remove doublets
+Identifying doublets in scRNA-Seq data set is difficult. A leading method to do this is *DoubletFinder*, which is used below.
 
+This method predicts doublets according to each real cell’s proximity in gene expression space to artificial doublets created by averaging the transcriptional profile of randomly chosen cell pairs (creates artificial doublets from the data) (9). 
 
-(Takes a few minutes to run)
+Note: don't run *DoubletFinder* on integrated scRNA-Seq data, as it will make artificial doublets on cells all samples, which would not happen in reality, and the estimtes will be inaccurate.
+
+#### Determine pK value
+The main parameter to determine is the pK, which is principal component neighborhood size used to compute proportion of artificial nearest neighbors, shown as a proportion of the combined real and artificial data. This needs to be optimized for each sample (recommended range is 0.005-0.3, and the optimum is usually on the lower end). The optimum pK is that which results in the highest mean-variance normalized bimodality coefficient (9).
+
+The pN value defines the number of artificially generated  doublets, shown as a proportion of the real data. The result is negligible when changing this parameter as *DoubletFinder* is insensitive to differences in sample sizes (number of cells). The recommended default is 0.25.
+
+*DoubletFinder* works very well for heterotypic doublets (two distinct transcriptional profiles hidden within one 'cell'). However, homotypic doublets (those containing 2 of the same cell type) are harder to identify. There is an additional step to estimate the number of 'homotypic' doublets by taking the sum of squares of the proportions of states present (here, using the previously determined clusters). This is then used to calculate the number of expected doublets in the data set.
+
+(Note: Takes ~10 minutes)
+
+Calculate pN and pK values
 ```{r, warning=FALSE, message=FALSE, eval=TRUE, include=FALSE}
 tic()
 sweep.res = paramSweep(S1, PCs = 1:15, sct = FALSE)
@@ -835,6 +989,7 @@ sweep.res = paramSweep(S1, PCs = 1:15, sct = FALSE)
 toc()
 ```
 
+Summarize and organize
 ```{r, warning=FALSE, message=FALSE}
 sweep.stats = summarizeSweep(sweep.res, GT = FALSE)
 # Organise the outputs
@@ -843,7 +998,7 @@ colnames(bc.mvn) <- c("ParamID", "pK", "MeanBC", "VarBC", "BCmetric")
 bc.mvn$pK <- unique(sweep.stats$pK); bc.mvn$ParamID <- 1:nrow(bc.mvn)
 ```
 
-
+Run a loop to calculate bimodiality coefficient (BC) metrics relative to pK values
 ```{r, warning=FALSE, message=FALSE}
 x <- 0
 for (i in unique(bc.mvn$pK)) {
@@ -861,13 +1016,12 @@ opt.pK = bc.mvn[which(bc.mvn$BCmetric == max(bc.mvn$BCmetric)), "pK_num"]
 opt.pK
 ```
 
-
+Estimate the homotypic proportion
 ```{r, warning=FALSE, message=FALSE}
 homotypic.prop = sum((table(Idents(S1))/sum(table(Idents(S1))))^2)
 nExp_poi <- round(0.05*ncol(S1)) ## Assuming 5% doublet rate from all cells
 nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
 ```
-
 
 Plot optimum pK value
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
@@ -891,14 +1045,16 @@ legend("topright", legend = paste("Optimum pK =", opt.pK), bty="n",
        text.font = 2, text.col = alpha("firebrick1", 0.5))
 ```
 
-Run DoubletFinder
+### Run DoubletFinder
+
+Now that the input parameters have been defined, run the main function of *DoubletFinder*.
 ```{r, warning=FALSE, message=FALSE}
 tic()
 seu1 <- doubletFinder(S1, PCs = 1:15, pN = 0.25, pK = opt.pK,
                          nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = FALSE)
 toc()
 ```
-add as metadata
+Add the results as metadata in the Seurat object
 ```{r, warning=FALSE, message=FALSE}
 # Check samples match
 identical(colnames(S1), colnames(seu1))
@@ -907,6 +1063,10 @@ S1$Doublet = seu1@meta.data[, ncol(seu1@meta.data)]
 # Number of doublets
 table(S1$Doublet)
 ```
+
+This analysis identifies 264/5734 (4.6%) barcodes as doublets in this data set.
+
+Plot the the results over the UMAP
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
 setwd(paste(Out.dir, samp, sep = "/"))
 png(paste0("21)_", samp, "_DF_UMAP_Doublet.png"), units="in", width=6, height=5, res=600)
@@ -920,14 +1080,25 @@ DimPlot(S1, reduction = "umap", group.by = "Doublet", alpha = 0.4) + ggtitle(sam
   scale_color_manual(values=c("black", "dodgerblue1"))
 ```
 
-Subset to only singlets
+Remove doublets 
 ```{r, warning=FALSE, message=FALSE}
-S1 = subset(S1, Doublet == "Singlet")
+S1 = subset(S1, Doublet != "Doublet")
 table(S1$Doublet)
 ```
 
-
 # SingleR annotation
+SingleR allows an unbiased estimation of which cell types are present. It does this by using reference (bulk) transcriptomic data sets of purified cell types to infer the cell of origin of cells present (10).
+
+This is often not perfect as the reference sets can be small and derived from different biological sources (e.g. health adult donors). However, it works well to confirm the higher-level cell type characterizations (e.g. T cell, B cell, monocyte)
+
+SingleR can be applied to each individual cell (can take hours) or by cluster. Additionally, it provides two 'depths' of cellular hierarchy to examine; the broad cell types and more specific cell types ('fine-tuned' - which takes longer and can often be inaccurate if the reference and test sets don't match up well)
+
+The inbuilt reference data sets are from:
+Immunological Genome Project and a brain-specific reference set for mice, and
+Human Primary Cell Atlas (microarray) and Blueprint Encode (RNA-Seq) for human
+Additionally, specifically created or manually curated reference data sets can be supplied, but this requires a lot of work and is not necessary here.
+
+Ultimately, cell type annotation is best left to a mix of unbiased and manually annotation methods once all samples in an experiment have been integrated. For the purposes of QC, the broad cell types are estimated by cluster from two different reference sets as a guide and to check for unexpected results.
 
 Get Human references
 ```{r, warning=FALSE, message=FALSE}
@@ -961,13 +1132,9 @@ DimPlot(S1, reduction = "umap", group.by = "SingleR_HPCA") + ggtitle(samp)
 invisible(dev.off())
 ```
 
-
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
 DimPlot(S1, reduction = "umap", group.by = "SingleR_HPCA") + ggtitle(samp)
 ```
-
-
-
 
 Plot by the Blueprint Encode annotations
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, eval=TRUE}
@@ -977,14 +1144,15 @@ DimPlot(S1, reduction = "umap", group.by = "SingleR_BPE") + ggtitle(samp)
 invisible(dev.off())
 ```
 
-
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=6, fig.height=5}
 DimPlot(S1, reduction = "umap", group.by = "SingleR_BPE") + ggtitle(samp)
 ```
 
-
+Overall, the reference-based annotation generally corroborate the manual annotations.
 
 # Save sample
+
+Save the pre-processed data set as a .rds file, which can be used with other pre-processed samples for integration and analysis.
 
 Adding metadata now is helpful once samples have been integrated
 ```{r, warning=FALSE, message=FALSE}
@@ -1002,6 +1170,8 @@ saveRDS(S1, paste(samp,"_Cleaned.rds", sep=""))
 
 # Key metrics
 
+Can also create a table of some of the key metrics for the samples, which can be helpful as an overview of sample quality.
+
 Number of cells
 ```{r, warning=FALSE, message=FALSE}
 print("Number of cells")
@@ -1018,8 +1188,6 @@ Total sample library size
 ```{r, warning=FALSE, message=FALSE}
 sum(GetAssayData(object = S1, layer = "counts"))
 ```
-
-
 
 Median counts per cell
 ```{r, warning=FALSE, message=FALSE}
@@ -1061,9 +1229,36 @@ invisible(dev.off())
 ```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=3, fig.height=3}
 grid.arrange(ss)
 ```
+\newpage
+
+# References
+
+**1)** Pearce SF, Rebelo-Guiomar P, D’Souza AR, Powell CA, Van Haute L, Minczuk M. Regulation of Mammalian Mitochondrial Gene Expression: Recent Advances. Trends Biochem Sci. 2017 Aug;42(8):625-639. doi: 10.1016/j.tibs.2017.02.003. Epub 2017 Mar 9. PMID: 28285835.
+
+**2)** Osorio D, Cai JJ. Systematic determination of the mitochondrial proportion in human and mice tissues for single-cell RNA-sequencing data quality control. Bioinformatics. 2021 May 17;37(7):963-967. doi: 10.1093/bioinformatics/btaa751. PMID: 32840568.
+
+**3)** Satija R, Farrell JA, Gennert D, Schier AF, Regev A. Spatial reconstruction of single-cell gene expression data. Nat Biotechnol. 2015 May;33(5):495-502. doi: 10.1038/nbt.3192. Epub 2015 Apr 13. PMID: 25867923.
+
+**4)** Butler A, Hoffman P, Smibert P, Papalexi E, Satija R. Integrating single-cell transcriptomic data across different conditions, technologies, and species. Nat Biotechnol. 2018 Jun;36(5):411-420. doi: 10.1038/nbt.4096. Epub 2018 Apr 2. PMID: 29608179.
+
+**5)** Stuart T, Butler A, Hoffman P, Hafemeister C, Papalexi E, Mauck WM 3rd, Hao Y, Stoeckius M, Smibert P, Satija R. Comprehensive Integration of Single-Cell Data. Cell. 2019 Jun 13;177(7):1888-1902.e21. doi: 10.1016/j.cell.2019.05.031. Epub 2019 Jun 6. PMID: 31178118.
+
+**6)** Hao Y, Hao S, Andersen-Nissen E, Mauck WM 3rd, Zheng S, Butler A, Lee MJ, Wilk AJ, Darby C, Zager M, Hoffman P, Stoeckius M, Papalexi E, Mimitou EP, Jain J, Srivastava A, Stuart T, Fleming LM, Yeung B, Rogers AJ, McElrath JM, Blish CA, Gottardo R, Smibert P, Satija R. Integrated analysis of multimodal single-cell data. Cell. 2021 Jun 24;184(13):3573-3587.e29. doi: 10.1016/j.cell.2021.04.048. Epub 2021 May 31. PMID: 34062119.
+
+**7)** McInnes, L, Healy, J, UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction, ArXiv e-prints 1802.03426, 2018.
+
+**8)** Hsiao CJ, Tung P, Blischak JD, Burnett JE, Barr KA, Dey KK, Stephens M, Gilad Y. Characterizing and inferring quantitative cell cycle phase in single-cell RNA-seq data analysis. Genome Res. 2020 Apr;30(4):611-621. doi: 10.1101/gr.247759.118. Epub 2020 Apr 20. PMID: 32312741.
+
+**9)** McGinnis CS, Murrow LM, Gartner ZJ. DoubletFinder: Doublet Detection in Single-Cell RNA Sequencing Data Using Artificial Nearest Neighbors. Cell Syst. 2019 Apr 24;8(4):329-337.e4. doi: 10.1016/j.cels.2019.03.003. Epub 2019 Apr 3. PMID: 30954475.
+
+**10)** Aran D, Looney AP, Liu L, Wu E, Fong V, Hsu A, Chak S, Naikawadi RP, Wolters PJ, Abate AR, Butte AJ, Bhattacharya M. Reference-based analysis of lung single-cell sequencing reveals a transitional profibrotic macrophage. Nat Immunol. 2019 Feb;20(2):163-172. doi: 10.1038/s41590-018-0276-y. Epub 2019 Jan 14. PMID: 30643263.
+\newpage
+
+
 
 # Session information
 
+The *sessionInfo* function displays which packages were loaded for the analysis and their versions.
 ```{r, warning=FALSE, message=FALSE}
 sessionInfo()
 ```
